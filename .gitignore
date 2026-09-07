@@ -1,0 +1,23 @@
+# PlatformIO
+.pio/
+.pioenvs/
+.piolibdeps/
+
+# VS Code
+.vscode/*
+!.vscode/extensions.json
+
+# 認証情報（Wi-Fi パスワード、AWS IoT 証明書など）
+firmware/include/secrets.h
+*.pem
+*.key
+*.crt
+
+# Terraform
+*.tfvars
+.terraform/
+*.tfstate
+*.tfstate.*
+
+# macOS
+.DS_Store
