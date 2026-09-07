@@ -132,6 +132,37 @@ ls /dev/cu.*
 
 ---
 
+## 記事と Issue の運用
+
+**1記事 = 1 Issue** で管理する。Issue はこのリポジトリ（public）側に作成する。
+
+記事はこのプロジェクトの作業の副産物であり、作業記録は作業リポジトリにあるのが
+自然なため。設計判断の過程が公開されること自体が、初心者向けチュートリアルという
+目標に対する価値になる。
+
+### 手順
+
+1. 作業開始前に `.github/ISSUE_TEMPLATE/article.md` から Issue を作成する
+2. 作業中は Issue に随時追記する（清書は不要）
+   - 実行したコマンドと結果
+   - ハマった点は「症状・原因・解決方法」をセットで
+   - 設計判断は選択肢の比較と採用理由を残す
+3. 記事執筆時に Issue の内容を素材として使う
+4. 公開後、Issue に公開 URL を記入して close する
+
+### 注意
+
+public リポジトリのため、Issue に機密情報を書かないこと。
+Wi-Fi 認証情報、AWS の認証情報、個人を特定できる情報は記載しない。
+
+### 記事の置き場所
+
+記事本体は別リポジトリ `nakamuram-blog`（private）の
+`src/data/blog/` に置く。写真は `src/assets/images/<slug>/` に配置し、
+Markdown からは `@/assets/images/<slug>/xxx.png` で参照する。
+
+---
+
 ## 参考ドキュメント
 
 - [Freenove FNK0090 チュートリアル](https://docs.freenove.com/projects/fnk0090/en/latest/)
