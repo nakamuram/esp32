@@ -190,7 +190,29 @@ CH340 は高速転送で不安定になる。`platformio.ini` の `upload_speed`
    - ハマった点は「症状・原因・解決方法」をセットで
    - 設計判断は選択肢の比較と採用理由を残す
 3. 記事執筆時に Issue の内容を素材として使う
-4. 公開後、Issue に公開 URL を記入して close する
+4. **公開前に必ずローカルプレビューで確認する**（記事 #3 以降）
+5. 公開後、Issue に公開 URL を記入して close する
+
+### 公開前の確認手順
+
+push すると Cloudflare Pages が自動デプロイして即座に公開されるため、
+その前に必ずローカルで内容を確認する。
+
+```bash
+# 1. コンテナでビルド検証
+podman run --rm -v "$PWD":/app -v nakamuram_blog_node_modules:/app/node_modules \
+  -w /app node:lts sh -c "npx astro check && npx astro build"
+
+# 2. dist/ を配信してプレビュー
+podman run -d --name blog-preview -p 4321:80 \
+  -v "$PWD/dist":/usr/share/nginx/html:ro nginx:alpine
+```
+
+`http://localhost:4321/posts/<slug>/` を開いて確認し、
+問題がなければコミットと push を行う。
+
+nginx はポートフォワード環境で Location からポート番号を落とすため、
+`absolute_redirect off;` を設定した conf をマウントすること。
 
 ### 注意
 
