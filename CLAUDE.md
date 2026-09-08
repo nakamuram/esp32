@@ -29,7 +29,8 @@ esp32/
 │   ├── platformio.ini ボード・依存ライブラリのバージョン固定
 │   ├── src/           ソース
 │   ├── include/       ヘッダ（secrets.h は .gitignore で除外）
-│   └── lib/           プロジェクト固有ライブラリ
+│   ├── lib/           プロジェクト固有ライブラリ
+│   └── tools/         開発補助スクリプト（Python）
 ├── infra/             Terraform（AWS 側。未作成）
 └── docs/
     └── learning-logs/ 作業記録
@@ -54,7 +55,22 @@ esp32/
 AWS 側の Terraform コードを `infra/` に並置するため、リポジトリ直下を PlatformIO プロジェクトにせず 1 階層下げた。
 PlatformIO のコマンドは `-d firmware` で実行するか、`firmware/` に移動してから実行する。
 
-### 3. 認証情報の管理
+### 3. Python は venv で実行する
+
+システムの Python を汚さず依存を隔離するため、Python を使う場面では必ず venv を作る。
+Homebrew の Python は PEP 668 により `pip install` が拒否される場合もある。
+
+```bash
+python3 -m venv .venv
+.venv/bin/pip install -r firmware/tools/requirements.txt
+```
+
+グローバル設定はスクリプトのコンテナ実行を求めているが、USB シリアル通信は
+コンテナ化が原理的に不可能（設計決定 1 を参照）。その中間として venv を用いる。
+
+`.venv/` は `.gitignore` で除外し、依存は `requirements.txt` に固定する。
+
+### 4. 認証情報の管理
 
 Wi-Fi パスワードや AWS IoT 証明書は `firmware/include/secrets.h` に置き、`.gitignore` で除外する。
 テンプレートとして `firmware/include/secrets.h.example` をコミットしている。
@@ -72,8 +88,12 @@ pio run -d firmware
 # ビルド＋書き込み
 pio run -d firmware -t upload
 
-# シリアルモニタ（115200 bps）
+# シリアルモニタ（115200 bps、対話用）
 pio device monitor -b 115200
+
+# シリアルモニタ（リセット付き。スクリプトから使う場合はこちら）
+.venv/bin/python firmware/tools/serial_monitor.py        # Ctrl-C まで読む
+.venv/bin/python firmware/tools/serial_monitor.py -d 10  # 10秒で終了
 
 # 接続中のシリアルポートを確認
 pio device list
@@ -117,10 +137,32 @@ ls /dev/cu.*
 
 `/dev/cu.usbserial-*` や `/dev/cu.wchusbserial-*` が現れない場合:
 
-- **CP2102 搭載機**: macOS の標準ドライバで認識されるはず。USB ケーブルが充電専用でないか確認する
-- **CH340 搭載機**: ドライバの追加導入が必要な場合がある
+- **CH340 搭載機**（本プロジェクトの FNK0090 はこちら。VID `1A86` / PID `7523`）:
+  macOS 標準ドライバで認識される。実機で確認済みで、追加ドライバは不要だった
+- **CP2102 搭載機**: 同じく macOS の標準ドライバで認識される
 
 データ通信対応の USB ケーブルを使っているかをまず疑うこと。
+
+### 書き込みが `Unable to verify flash chip connection` で失敗する
+
+```
+Chip is ESP32-D0WD-V3 (revision v3.1)
+Changing baud rate to 921600
+A fatal error occurred: Unable to verify flash chip connection
+(Serial data stream stopped: Possible serial noise or corruption.)
+```
+
+チップの型番まで読めているため配線やドライバの問題に見えるが、原因は書き込み速度。
+CH340 は高速転送で不安定になる。`platformio.ini` の `upload_speed` を 460800 に
+下げると解決する（実機で確認済み）。
+
+### スクリプトからシリアル出力を読みたい
+
+`pio device monitor` は対話端末を要求するため、パイプやリダイレクトの下では
+`UserSideException` で失敗する。`firmware/tools/serial_monitor.py` を使うこと。
+
+なお macOS では `/dev/cu.*` を開き直すたびに termios がリセットされるため、
+`stty` で設定してから別プロセスで `cat` する方法は文字化けする。
 
 ### 書き込み時に `Failed to connect to ESP32` が出る
 
