@@ -93,15 +93,27 @@ void loop() {
     Serial.println("BMP180      : 初期化に失敗しているため読み取りをスキップ");
   }
 
-  // Grove Light Sensor: 生値の平均でノイズを均す
+  // Grove Light Sensor: 生値の平均でノイズを均す。
+  // 未接続のピンは電荷が保持されず値が乱高下するため、サンプル間の
+  // ばらつき（最大-最小）が大きければ未接続と判定する。これが無いと、
+  // 浮いたピンのノイズをもっともらしい照度として出力してしまう。
   long sum = 0;
+  int lightMin = 4095, lightMax = 0;
   constexpr int N = 16;
   for (int i = 0; i < N; i++) {
-    sum += analogRead(LIGHT_PIN);
+    const int v = analogRead(LIGHT_PIN);
+    sum += v;
+    if (v < lightMin) lightMin = v;
+    if (v > lightMax) lightMax = v;
     delayMicroseconds(200);
   }
   const int lightRaw = sum / N;
-  Serial.printf("照度        : %4d (raw, 0-4095)\n", lightRaw);
+  const int lightSpread = lightMax - lightMin;
+  if (lightSpread > 500) {
+    Serial.printf("照度        : 未接続（ばらつき %d、フローティングの疑い）\n", lightSpread);
+  } else {
+    Serial.printf("照度        : %4d (raw, 0-4095)\n", lightRaw);
+  }
 
   Serial.println();
   delay(READ_INTERVAL_MS);
