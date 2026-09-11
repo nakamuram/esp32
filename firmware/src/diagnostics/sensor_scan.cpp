@@ -25,11 +25,18 @@ struct I2CPins { uint8_t a; uint8_t b; };
 constexpr I2CPins I2C_CANDIDATES[] = {
     {26, 25},  // このプロジェクトの配線（SDA=26, SCL=25）
     {21, 22},  // ESP32 の既定
+    {32, 33},  // 切り分け用。BMP180 / ESP32 のどちらが壊れているか切り分けるため、
+               // 一度も使っていない ADC1 のピンペアを試す
 };
 
 // 監視するアナログピン。ADC1 のみを使う。
 // ADC2（GPIO 0,2,4,12-15,25-27）は Wi-Fi 使用中に読めなくなる。
 constexpr uint8_t ANALOG_PINS[] = {32, 33, 34, 35};
+
+// DHT11 の DATA 線。アイドル時はモジュール上のプルアップで HIGH に
+// 保たれているはず。I2C のプルアップ検出と同じ考え方で、配線と電源が
+// 生きているかを応答の成否とは別に確認する。
+constexpr uint8_t DHT_PIN = 27;
 
 constexpr unsigned long MONITOR_INTERVAL_MS = 1000;
 constexpr unsigned long RESCAN_INTERVAL_MS = 30000;
@@ -219,8 +226,59 @@ static void runI2CDiagnostics() {
 
 // 未接続のピンは電荷が保持されず値が乱高下する。連続サンプルのばらつきで判定する。
 // GPIO34-39 は内部プルアップ/プルダウンを持たないため、この方法で見るしかない。
+// DHT11 の起動信号を送り、応答（80us LOW + 80us HIGH の ACK パルス）が
+// 返ってくるかをライブラリを介さず直接見る。エッジが一切なければ
+// センサー自体が応答していない可能性が高い。
+static void rawPulseDHT() {
+  // 起動信号: DATA を 18ms 以上 LOW にしてからリリースする
+  pinMode(DHT_PIN, OUTPUT);
+  digitalWrite(DHT_PIN, LOW);
+  delay(20);
+  digitalWrite(DHT_PIN, HIGH);
+  delayMicroseconds(30);
+  pinMode(DHT_PIN, INPUT);
+
+  // 直後 1ms のレベル変化（エッジ）を数える。ACK があれば数回、
+  // データ転送まで進めば 40bit 分のエッジが観測されるはず。
+  int edges = 0;
+  int last = digitalRead(DHT_PIN);
+  const unsigned long start = micros();
+  while (micros() - start < 5000) {  // 5ms 観測
+    const int now = digitalRead(DHT_PIN);
+    if (now != last) {
+      edges++;
+      last = now;
+    }
+  }
+
+  Serial.printf("  起動信号後 5ms のレベル変化: %d 回  %s\n", edges,
+                edges == 0 ? "→ 応答なし。センサー自体が反応していない疑い"
+                           : "→ 何らかの応答あり");
+}
+
+static void probeDHT() {
+  pinMode(DHT_PIN, INPUT);
+  delay(5);
+
+  constexpr int N = 50;
+  int high = 0;
+  for (int i = 0; i < N; i++) {
+    high += digitalRead(DHT_PIN);
+    delayMicroseconds(200);
+  }
+
+  const char *verdict;
+  if (high == N)      verdict = "プルアップ検出 → 配線と電源は生きている（応答するかは別）";
+  else if (high == 0) verdict = "常時 LOW → GND と短絡、または電源なし";
+  else                verdict = "不安定 → フローティングの疑い（DATA 未接続の可能性）";
+
+  Serial.printf("  GPIO%-2d (DHT11 DATA)  HIGH率 %3d%%  %s\n", DHT_PIN, high * 100 / N, verdict);
+}
+
 static void monitorAnalog() {
-  Serial.println("--- 4. アナログ入力 ---");
+  Serial.println("--- 4. DHT11 DATA線 と アナログ入力 ---");
+  probeDHT();
+  rawPulseDHT();
   for (uint8_t pin : ANALOG_PINS) {
     constexpr int N = 64;
     long sum = 0;

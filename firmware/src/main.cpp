@@ -1,169 +1,54 @@
-// Wi-Fi 接続とインターネット疎通の確認
+// BMP180（気圧・温度）と Grove Light Sensor（照度）の実測値を継続的に取得する。
 //
-// 起動時に以下を順に確認する。
-//   1. Wi-Fi 接続
-//   2. NTP による時刻同期（AWS IoT の TLS で証明書の有効期限検証に必要）
-//   3. DNS 解決
-//   4. HTTP 接続
-//   5. HTTPS 接続（TLS スタックの動作確認）
+// #4 で特定したセンサーとその配線:
+//   BMP180              (I2C)      気圧・温度   VCC ではなく 3.3 ピンから給電
+//   Grove Light Sensor  (アナログ) 照度         SIG は白線
+//
+// DHT11 も一時追加を試みたが、電気的には配線・電源とも正常（プルアップ検出）
+// なのに起動信号に一切応答せず、モジュール自体の故障と判断して撤去した。
+// この切り分けの過程で、BMP180 の SDA/SCL を当初の GPIO26/25 から
+// GPIO32/33 に変更している（診断の過程で GPIO26/25 が不安定になったため）。
+//
+// Wi-Fi 接続の詳細な確認は #3 で済ませているため、ここでは簡略化し、
+// 接続できなくてもセンサーの読み取りは継続する（オフラインでも動作を見たいため）。
 #include <Arduino.h>
-#include <HTTPClient.h>
 #include <WiFi.h>
-#include <WiFiClientSecure.h>
-#include <time.h>
+#include <Wire.h>
+#include <Adafruit_BMP085.h>
 
 #include "secrets.h"
 
 constexpr uint8_t LED_PIN = 2;
-constexpr unsigned long WIFI_TIMEOUT_MS = 20000;
-constexpr unsigned long NTP_TIMEOUT_MS = 15000;
-constexpr unsigned long STATUS_INTERVAL_MS = 30000;
 
-// 日本標準時。POSIX の TZ 表記では UTC からの「引く側」の符号になるため JST-9
-constexpr const char *TIMEZONE = "JST-9";
+// BMP180 (I2C)。GPIO32/33 で動作確認済み。
+constexpr uint8_t I2C_SDA = 32;
+constexpr uint8_t I2C_SCL = 33;
 
-// 疎通確認の宛先。example.com は IANA が例示用に予約しているドメイン
-constexpr const char *TEST_HOST = "example.com";
+// Grove Light Sensor (アナログ)。#4 で判明: SIG は黄ではなく白、GPIO35。
+// ADC1 のピンなので Wi-Fi 使用中でも読める。
+constexpr uint8_t LIGHT_PIN = 35;
 
-static void printChipInfo() {
-  Serial.println();
-  Serial.println("=== ESP32 起動 ===");
-  Serial.printf("チップモデル : %s (リビジョン %d)\n", ESP.getChipModel(), ESP.getChipRevision());
-  Serial.printf("CPU 周波数   : %d MHz\n", getCpuFrequencyMhz());
-  Serial.printf("空きヒープ   : %d bytes\n", ESP.getFreeHeap());
-  Serial.println("==================");
-}
+constexpr unsigned long WIFI_TIMEOUT_MS = 15000;
+constexpr unsigned long READ_INTERVAL_MS = 3000;
 
-static const char *wifiStatusText(wl_status_t status) {
-  switch (status) {
-    case WL_NO_SSID_AVAIL:   return "SSID が見つからない（SSID の誤り、または 5GHz 帯の可能性）";
-    case WL_CONNECT_FAILED:  return "接続失敗（パスワードの誤りの可能性）";
-    case WL_CONNECTION_LOST: return "接続が切断された";
-    case WL_DISCONNECTED:    return "未接続";
-    case WL_IDLE_STATUS:     return "待機中";
-    default:                 return "不明な状態";
-  }
-}
+Adafruit_BMP085 bmp;
+static bool bmpReady = false;
 
-static bool connectWiFi() {
-  Serial.printf("\n[1/5] Wi-Fi に接続しています: %s\n", WIFI_SSID);
-
+static void connectWiFi() {
+  Serial.printf("Wi-Fi に接続しています: %s\n", WIFI_SSID);
   WiFi.mode(WIFI_STA);
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
 
   const unsigned long start = millis();
   while (WiFi.status() != WL_CONNECTED) {
     if (millis() - start > WIFI_TIMEOUT_MS) {
-      const wl_status_t status = WiFi.status();
-      Serial.printf("\n  失敗: %d - %s\n", status, wifiStatusText(status));
-      return false;
+      Serial.println("  タイムアウト。オフラインのままセンサーの読み取りを続けます。");
+      return;
     }
     digitalWrite(LED_PIN, !digitalRead(LED_PIN));
-    Serial.print(".");
     delay(250);
   }
-
-  Serial.printf("\n  成功（%lu ms）\n", millis() - start);
-  Serial.printf("  IP: %s / 電波強度: %d dBm / チャンネル: %d\n",
-                WiFi.localIP().toString().c_str(), WiFi.RSSI(), WiFi.channel());
-  return true;
-}
-
-// NTP で時刻を合わせる。
-// AWS IoT Core への TLS 接続では証明書の有効期限を検証するため、
-// 時刻がずれていると原因の分かりにくい handshake 失敗になる。
-static bool syncTime() {
-  Serial.println("\n[2/5] NTP で時刻を同期しています");
-
-  configTzTime(TIMEZONE, "ntp.nict.jp", "pool.ntp.org", "time.google.com");
-
-  const unsigned long start = millis();
-  time_t now = time(nullptr);
-  // 2020-01-01 より前なら未同期とみなす
-  while (now < 1577836800) {
-    if (millis() - start > NTP_TIMEOUT_MS) {
-      Serial.printf("  失敗: %lu ms でタイムアウト\n", NTP_TIMEOUT_MS);
-      Serial.println("  NTP は UDP 123 番を使う。ルーターで遮断されていないか確認する");
-      return false;
-    }
-    delay(200);
-    Serial.print(".");
-    now = time(nullptr);
-  }
-
-  struct tm timeinfo;
-  localtime_r(&now, &timeinfo);
-  char buf[64];
-  strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", &timeinfo);
-  Serial.printf("\n  成功（%lu ms）: %s JST\n", millis() - start, buf);
-  return true;
-}
-
-static bool resolveDns() {
-  Serial.printf("\n[3/5] DNS を解決しています: %s\n", TEST_HOST);
-
-  IPAddress addr;
-  const unsigned long start = millis();
-  if (!WiFi.hostByName(TEST_HOST, addr)) {
-    Serial.println("  失敗: 名前解決できません");
-    return false;
-  }
-
-  Serial.printf("  成功（%lu ms）: %s\n", millis() - start, addr.toString().c_str());
-  return true;
-}
-
-static bool httpGet() {
-  Serial.printf("\n[4/5] HTTP で接続しています: http://%s/\n", TEST_HOST);
-
-  HTTPClient http;
-  http.setTimeout(10000);
-  if (!http.begin(String("http://") + TEST_HOST + "/")) {
-    Serial.println("  失敗: HTTPClient の初期化に失敗");
-    return false;
-  }
-
-  const unsigned long start = millis();
-  const int code = http.GET();
-  const int length = (code > 0) ? http.getSize() : 0;
-  http.end();
-
-  if (code <= 0) {
-    Serial.printf("  失敗: %s\n", HTTPClient::errorToString(code).c_str());
-    return false;
-  }
-
-  Serial.printf("  成功（%lu ms）: HTTP %d / %d bytes\n", millis() - start, code, length);
-  return true;
-}
-
-static bool httpsGet() {
-  Serial.printf("\n[5/5] HTTPS で接続しています: https://%s/\n", TEST_HOST);
-
-  WiFiClientSecure client;
-  // ここではサーバ証明書を検証しない。TLS スタックが動くことの確認が目的。
-  // AWS IoT Core に接続する際は Amazon のルート CA を設定して検証を有効にする。
-  client.setInsecure();
-
-  HTTPClient https;
-  https.setTimeout(15000);
-  if (!https.begin(client, String("https://") + TEST_HOST + "/")) {
-    Serial.println("  失敗: HTTPClient の初期化に失敗");
-    return false;
-  }
-
-  const unsigned long start = millis();
-  const int code = https.GET();
-  const int length = (code > 0) ? https.getSize() : 0;
-  https.end();
-
-  if (code <= 0) {
-    Serial.printf("  失敗: %s\n", HTTPClient::errorToString(code).c_str());
-    return false;
-  }
-
-  Serial.printf("  成功（%lu ms）: HTTPS %d / %d bytes\n", millis() - start, code, length);
-  return true;
+  Serial.printf("  接続しました: %s\n", WiFi.localIP().toString().c_str());
 }
 
 void setup() {
@@ -173,47 +58,51 @@ void setup() {
   pinMode(LED_PIN, OUTPUT);
   digitalWrite(LED_PIN, LOW);
 
-  printChipInfo();
-
-  int passed = 0;
-  if (connectWiFi()) {
-    passed++;
-    if (syncTime())   passed++;
-    if (resolveDns()) passed++;
-    if (httpGet())    passed++;
-    if (httpsGet())   passed++;
-  }
-
   Serial.println();
-  Serial.println("==================");
-  Serial.printf("疎通確認: %d / 5 項目で成功\n", passed);
-  Serial.printf("空きヒープ: %d bytes\n", ESP.getFreeHeap());
-  Serial.println("==================");
+  Serial.println("=== センサー実測 ===");
+
+  connectWiFi();
+
+  Wire.begin(I2C_SDA, I2C_SCL);
+  bmpReady = bmp.begin();
+  Serial.println(bmpReady ? "BMP180 初期化成功"
+                           : "BMP180 初期化失敗。配線（3.3ピン給電・SDA/SCL）を確認してください");
+
+  analogReadResolution(12);  // 0-4095
+
+  Serial.println("====================");
+  Serial.println();
 }
 
 void loop() {
-  static unsigned long lastStatus = 0;
-
   digitalWrite(LED_PIN, HIGH);
-  delay(1000);
+  delay(100);
   digitalWrite(LED_PIN, LOW);
-  delay(1000);
 
-  if (millis() - lastStatus >= STATUS_INTERVAL_MS) {
-    lastStatus = millis();
+  Serial.println("--- 実測値 ---");
 
-    if (WiFi.status() != WL_CONNECTED) {
-      Serial.println("切断されました。再接続します。");
-      connectWiFi();
-      return;
-    }
-
-    const time_t now = time(nullptr);
-    struct tm timeinfo;
-    localtime_r(&now, &timeinfo);
-    char buf[32];
-    strftime(buf, sizeof(buf), "%H:%M:%S", &timeinfo);
-    Serial.printf("%s JST - IP: %s / 電波強度: %d dBm / 空きヒープ: %d bytes\n",
-                  buf, WiFi.localIP().toString().c_str(), WiFi.RSSI(), ESP.getFreeHeap());
+  // BMP180: 気圧・温度・海面高度からの相対高度
+  if (bmpReady) {
+    const float pressure = bmp.readPressure() / 100.0f;  // Pa → hPa
+    const float bmpTemp = bmp.readTemperature();
+    const float altitude = bmp.readAltitude();
+    Serial.printf("気圧        : %.1f hPa\n", pressure);
+    Serial.printf("高度        : %.1f m\n", altitude);
+    Serial.printf("温度        : %.1f C\n", bmpTemp);
+  } else {
+    Serial.println("BMP180      : 初期化に失敗しているため読み取りをスキップ");
   }
+
+  // Grove Light Sensor: 生値の平均でノイズを均す
+  long sum = 0;
+  constexpr int N = 16;
+  for (int i = 0; i < N; i++) {
+    sum += analogRead(LIGHT_PIN);
+    delayMicroseconds(200);
+  }
+  const int lightRaw = sum / N;
+  Serial.printf("照度        : %4d (raw, 0-4095)\n", lightRaw);
+
+  Serial.println();
+  delay(READ_INTERVAL_MS);
 }
