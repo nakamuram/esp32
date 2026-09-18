@@ -1,0 +1,9 @@
+aws_region    = "ap-northeast-1"
+project_name  = "esp32-sensor"
+device_secret = "change-me-to-a-random-string"
+
+# 設置場所に最も近い気象庁アメダス観測所のコード（5桁）。2地点指定して重ね描きする。
+# https://www.jma.go.jp/bosai/amedas/const/amedastable.json で緯度経度から調べる。
+# 設置場所を推測されるため、実際の値は公開しないこと。
+amedas_station_code   = "00000"
+amedas_station_code_2 = "00000"

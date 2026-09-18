@@ -13,10 +13,13 @@
 // 接続できなくてもセンサーの読み取りは継続する（オフラインでも動作を見たいため）。
 #include <Arduino.h>
 #include <WiFi.h>
+#include <WiFiClientSecure.h>
+#include <HTTPClient.h>
 #include <Wire.h>
 #include <Adafruit_BMP085.h>
 
 #include "secrets.h"
+#include "aws_root_ca.h"
 
 constexpr uint8_t LED_PIN = 2;
 
@@ -29,7 +32,7 @@ constexpr uint8_t I2C_SCL = 33;
 constexpr uint8_t LIGHT_PIN = 35;
 
 constexpr unsigned long WIFI_TIMEOUT_MS = 15000;
-constexpr unsigned long READ_INTERVAL_MS = 3000;
+constexpr unsigned long READ_INTERVAL_MS = 60000;  // #8: コスト試算の上で1分間隔に決定
 
 Adafruit_BMP085 bmp;
 static bool bmpReady = false;
@@ -74,6 +77,44 @@ void setup() {
   Serial.println();
 }
 
+// #8: API Gateway + Lambda に HTTPS POST する。
+// 認証は mTLS ではなく、Lambda 側で照合する共有シークレットヘッダー（簡易方式、詳細は Issue #8）。
+// 照度は AWS 側で不要と判断したため送信対象に含めない（ローカルのシリアル出力のみ）。
+static void sendToAws(bool hasPressureTemp, float pressure, float temperature) {
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("AWS送信      : Wi-Fi未接続のためスキップ");
+    return;
+  }
+  if (!hasPressureTemp) {
+    return;
+  }
+
+  char body[256];
+  int len = snprintf(body, sizeof(body),
+                      "{\"device_id\":\"%s\",\"pressure_hpa\":%.2f,\"temperature_c\":%.2f",
+                      DEVICE_ID, pressure, temperature);
+  len += snprintf(body + len, sizeof(body) - len, "}");
+
+  WiFiClientSecure client;
+  client.setCACert(AWS_ROOT_CA1);
+
+  HTTPClient http;
+  if (!http.begin(client, AWS_API_ENDPOINT)) {
+    Serial.println("AWS送信      : HTTPClient begin 失敗");
+    return;
+  }
+  http.addHeader("Content-Type", "application/json");
+  http.addHeader("x-device-secret", AWS_DEVICE_SECRET);
+
+  const int statusCode = http.POST(reinterpret_cast<uint8_t*>(body), len);
+  if (statusCode > 0) {
+    Serial.printf("AWS送信      : HTTP %d\n", statusCode);
+  } else {
+    Serial.printf("AWS送信      : 失敗 (%s)\n", http.errorToString(statusCode).c_str());
+  }
+  http.end();
+}
+
 void loop() {
   digitalWrite(LED_PIN, HIGH);
   delay(100);
@@ -82,10 +123,14 @@ void loop() {
   Serial.println("--- 実測値 ---");
 
   // BMP180: 気圧・温度・海面高度からの相対高度
+  bool hasPressureTemp = false;
+  float pressure = 0.0f;
+  float bmpTemp = 0.0f;
   if (bmpReady) {
-    const float pressure = bmp.readPressure() / 100.0f;  // Pa → hPa
-    const float bmpTemp = bmp.readTemperature();
+    pressure = bmp.readPressure() / 100.0f;  // Pa → hPa
+    bmpTemp = bmp.readTemperature();
     const float altitude = bmp.readAltitude();
+    hasPressureTemp = true;
     Serial.printf("気圧        : %.1f hPa\n", pressure);
     Serial.printf("高度        : %.1f m\n", altitude);
     Serial.printf("温度        : %.1f C\n", bmpTemp);
@@ -114,6 +159,8 @@ void loop() {
   } else {
     Serial.printf("照度        : %4d (raw, 0-4095)\n", lightRaw);
   }
+
+  sendToAws(hasPressureTemp, pressure, bmpTemp);
 
   Serial.println();
   delay(READ_INTERVAL_MS);
