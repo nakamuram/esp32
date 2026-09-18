@@ -17,6 +17,7 @@
 #include <HTTPClient.h>
 #include <Wire.h>
 #include <Adafruit_BMP085.h>
+#include <esp_task_wdt.h>
 
 #include "secrets.h"
 #include "aws_root_ca.h"
@@ -33,6 +34,11 @@ constexpr uint8_t LIGHT_PIN = 35;
 
 constexpr unsigned long WIFI_TIMEOUT_MS = 15000;
 constexpr unsigned long READ_INTERVAL_MS = 60000;  // #8: コスト試算の上で1分間隔に決定
+
+// 9/15-18、USB給電でのテスト稼働中に3日間フリーズし、リセットボタンでも
+// 復帰しなかった事象が発生。ハードウェアウォッチドッグで自動復帰させる。
+// 1周期（実測1〜2秒 + 60秒スリープ）に対して十分な余裕を持たせた値。
+constexpr uint32_t WDT_TIMEOUT_S = 120;
 
 Adafruit_BMP085 bmp;
 static bool bmpReady = false;
@@ -60,6 +66,12 @@ void setup() {
 
   pinMode(LED_PIN, OUTPUT);
   digitalWrite(LED_PIN, LOW);
+
+  // ウォッチドッグ登録。loop() が一周（センサー読み取り+送信+スリープ）を
+  // WDT_TIMEOUT_S 以内に完了できなければ自動的にリセットされる。
+  // Arduino コアの loopTask が既に登録済みの場合はエラーになるが無視してよい。
+  esp_task_wdt_init(WDT_TIMEOUT_S, true);
+  esp_task_wdt_add(NULL);
 
   Serial.println();
   Serial.println("=== センサー実測 ===");
@@ -116,6 +128,11 @@ static void sendToAws(bool hasPressureTemp, float pressure, float temperature) {
 }
 
 void loop() {
+  // 周期の先頭でfeedする。この呼び出しからここに戻ってくるまで
+  // （センサー読み取り・AWS送信・スリープを含む一周分）がWDT_TIMEOUT_S以内で
+  // あることが前提。ここに戻れなければ何かがハングしているということ。
+  esp_task_wdt_reset();
+
   digitalWrite(LED_PIN, HIGH);
   delay(100);
   digitalWrite(LED_PIN, LOW);
